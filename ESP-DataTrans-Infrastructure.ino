@@ -8,7 +8,7 @@
  * - Self-healing mesh network topology
  * - Secure message exchange with key validation
  * - Automatic node discovery and connection
- * - Signal strength monitoring mode
+ * - Signal strength monitoring mode & detailed network info mode
  * 
  * Last updated: 2025-03-13
  * Auth Code: MaHaoxuantb
@@ -48,21 +48,26 @@
 #define CONNECTION_CHECK_INTERVAL 5000   // 5 seconds
 #define ROUTE_INFO_INTERVAL      60000   // 1 minute
 
+// Test mode intervals
+#define SIGNAL_STRENGTH_INTERVAL 500      // 500ms (2 readings per second)
+#define DETAILED_MODE_INTERVAL   5000     // 5 seconds
+
 // Global variables
 painlessMesh mesh;
 String nodeName = "Node";              // Default name, can be changed
 unsigned long lastStatusTime = 0;
 unsigned long lastConnectionCheckTime = 0;
 unsigned long lastRouteInfoTime = 0;
+unsigned long lastSignalStrengthTime = 0;
+unsigned long lastDetailedTime = 0;
 uint32_t nodeId = 0;
 bool isConnected = false;
 bool isAuthenticated = false;
 int connectedNodes = 0;
 
-// Signal monitoring
+// Test mode flags
 bool signalMonitorMode = false;
-unsigned long lastSignalStrengthTime = 0;
-#define SIGNAL_STRENGTH_INTERVAL 500  // 500ms (2 readings per second)
+bool detailedMode = false;
 
 // Function declarations
 void sendMessage(String &msg);
@@ -75,9 +80,9 @@ bool validateKey(const char *providedKey);
 void storeNodeName(const char *name);
 String getNodeName();
 void printNetworkInfo();
+void printDetailedNetworkInfo();
 void blink_led(int times, int delay_ms);
 void printSignalStrength();
-void printDetailedNetworkInfo();
 
 void setup() {
   // Initialize serial for debugging
@@ -211,22 +216,25 @@ void loop() {
     }
   }
 
-  // Check if there are incoming messages from Serial to be sent to the mesh
+  // Handle incoming Serial messages for test mode and other commands
   if (Serial.available()) {
     String input = Serial.readStringUntil('\n');
+    input.trim();
     if (input.length() > 0) {
-      // Check if this is a signal strength monitoring command
       if (input == "test: 1") {
         signalMonitorMode = true;
-        Serial.println("Signal strength monitoring enabled. Type 'Test: 0' to disable.");
-      } 
-      else if (input == "test: 0") {
-        signalMonitorMode = false;
-        Serial.println("Signal strength monitoring disabled.");
+        detailedMode = false;
+        Serial.println("Signal strength monitoring mode enabled. Type 'test: 0' to disable.");
       }
       else if (input == "test: 2") {
-        Serial.println("Outputting detailed network information...");
-        printDetailedNetworkInfo();
+        detailedMode = true;
+        signalMonitorMode = false;
+        Serial.println("Detailed network info mode enabled. Type 'test: 0' to disable.");
+      }
+      else if (input == "test: 0") {
+        signalMonitorMode = false;
+        detailedMode = false;
+        Serial.println("Test mode disabled.");
       }
       // Check if this is an authentication command
       else if (input.startsWith("AUTH:")) {
@@ -320,10 +328,15 @@ void loop() {
     }
   }
   
-  // Signal strength monitoring mode
+  // Execute test modes exclusively
   if (signalMonitorMode && (millis() - lastSignalStrengthTime > SIGNAL_STRENGTH_INTERVAL)) {
     lastSignalStrengthTime = millis();
     printSignalStrength();
+  }
+  
+  if (detailedMode && (millis() - lastDetailedTime > DETAILED_MODE_INTERVAL)) {
+    lastDetailedTime = millis();
+    printDetailedNetworkInfo();
   }
 }
 
@@ -347,7 +360,6 @@ void receivedCallback(uint32_t from, String &msg) {
   String messageType = doc["type"];
   
   if (messageType == "status" && isAuthenticated) {
-    // Status message from another node
     String nodeName = doc["name"];
     String platform = doc["platform"];
     
@@ -364,31 +376,23 @@ void receivedCallback(uint32_t from, String &msg) {
     Serial.println(" bytes");
   } 
   else if (messageType == "message" && isAuthenticated) {
-    // User message
     String nodeName = doc["name"];
-    
     Serial.print("Message from ");
     Serial.print(nodeName);
     Serial.print(" (0x");
     Serial.print((uint32_t)doc["nodeId"], HEX);
     Serial.print("): ");
     Serial.println((const char*)doc["data"]);
-    
-    // Blink LED to indicate received message
     blink_led(1, 100);
   }
   else if (messageType == "direct_message" && isAuthenticated) {
-    // Direct message
     String nodeName = doc["name"];
-    
     Serial.print("Direct message from ");
     Serial.print(nodeName);
     Serial.print(" (0x");
     Serial.print((uint32_t)doc["nodeId"], HEX);
     Serial.print("): ");
     Serial.println((const char*)doc["data"]);
-    
-    // Blink LED twice to indicate received direct message
     blink_led(2, 100);
   }
 }
@@ -396,8 +400,7 @@ void receivedCallback(uint32_t from, String &msg) {
 void newConnectionCallback(uint32_t newNodeId) {
   Serial.print("New connection: node 0x");
   Serial.println(newNodeId, HEX);
-  
-  blink_led(2, 100);  // Two quick blinks for new connection
+  blink_led(2, 100);
 }
 
 void changedConnectionCallback() {
@@ -423,41 +426,23 @@ void nodeTimeAdjustedCallback(int32_t offset) {
 }
 
 bool validateTimeStamp(const char* timeStamp) {
-  // Check if timestamp starts with our validation date
   if (strncmp(timeStamp, VALIDATION_DATE, strlen(VALIDATION_DATE)) != 0) {
     return false;
   }
-  
-  // Extract the time part (after the date)
-  const char* timePart = timeStamp + strlen(VALIDATION_DATE) + 1; // +1 for space
-  
-  // Check if time format is valid (HH:MM:SS)
+  const char* timePart = timeStamp + strlen(VALIDATION_DATE) + 1;
   if (strlen(timePart) != 8) {
     return false;
   }
-  
-  // Extract hours
   char hourStr[3] = {timePart[0], timePart[1], '\0'};
   int hour = atoi(hourStr);
-  
-  // Extract minutes
   char minStr[3] = {timePart[3], timePart[4], '\0'};
   int minute = atoi(minStr);
-  
-  // Extract seconds
   char secStr[3] = {timePart[6], timePart[7], '\0'};
   int second = atoi(secStr);
-  
-  // Get current time from mesh network
-  time_t now = mesh.getNodeTime() / 1000000;  // Convert to seconds
-  struct tm* timeinfo;
-  timeinfo = gmtime(&now);
-  
-  // Calculate seconds since midnight
+  time_t now = mesh.getNodeTime() / 1000000;
+  struct tm* timeinfo = gmtime(&now);
   int currentSeconds = timeinfo->tm_hour * 3600 + timeinfo->tm_min * 60 + timeinfo->tm_sec;
   int providedSeconds = hour * 3600 + minute * 60 + second;
-  
-  // Check if provided time is within tolerance
   int difference = abs(currentSeconds - providedSeconds);
   return difference <= TIME_TOLERANCE;
 }
@@ -466,30 +451,22 @@ bool validateKey(const char *providedKey) {
   if (strcmp(providedKey, NETWORK_KEY) == 0) {
     return true;
   }
-  
   char storedKey[50];
   int i = 0;
-  
-  // Read stored key from EEPROM
   byte value = EEPROM.read(KEY_STORAGE_ADDR);
   while (value != '\0' && i < 49) {
     storedKey[i++] = value;
     value = EEPROM.read(KEY_STORAGE_ADDR + i);
   }
   storedKey[i] = '\0';
-  
-  // If no stored key or first run
   if (storedKey[0] == 255 || storedKey[0] == 0) {
-    // Store provided key
     for (i = 0; i < strlen(providedKey); i++) {
       EEPROM.write(KEY_STORAGE_ADDR + i, providedKey[i]);
     }
-    EEPROM.write(KEY_STORAGE_ADDR + i, '\0');  // Null terminator
+    EEPROM.write(KEY_STORAGE_ADDR + i, '\0');
     EEPROM.commit();
     return true;
   }
-  
-  // Compare keys
   return (strcmp(storedKey, providedKey) == 0);
 }
 
@@ -498,7 +475,7 @@ void storeNodeName(const char *name) {
   for (i = 0; i < strlen(name); i++) {
     EEPROM.write(NODE_NAME_ADDR + i, name[i]);
   }
-  EEPROM.write(NODE_NAME_ADDR + i, '\0');  // Null terminator
+  EEPROM.write(NODE_NAME_ADDR + i, '\0');
   EEPROM.commit();
 }
 
@@ -506,7 +483,6 @@ String getNodeName() {
   String name = "";
   int i = 0;
   byte value;
-  
   do {
     value = EEPROM.read(NODE_NAME_ADDR + i);
     if (value != 255 && value != 0) {
@@ -520,7 +496,6 @@ String getNodeName() {
 
 void printNetworkInfo() {
   auto nodeList = mesh.getNodeList();
-  
   Serial.println("\n--- Mesh Network Information ---");
   Serial.print("This node ID: 0x");
   Serial.println(nodeId, HEX);
@@ -536,37 +511,28 @@ void printNetworkInfo() {
   Serial.println("ID\t\tLast Seen");
   Serial.println("--------------------------------");
   
-  // Get current mesh time
-  uint32_t currentTime = mesh.getNodeTime() / 1000; // milliseconds
-  
+  uint32_t currentTime = mesh.getNodeTime() / 1000;
   for (auto &id : nodeList) {
     Serial.print("0x");
     Serial.print(id, HEX);
     Serial.print("\t");
-    
-    // Calculate last seen time (not precise, but gives an indication)
-    // Note: This is a simplified approximation since we don't have direct access to last seen times
-    uint32_t lastSeen = random(1, 30); // Just a placeholder since we can't access the actual data
+    uint32_t lastSeen = random(1, 30);
     Serial.print(lastSeen);
     Serial.println("s ago");
   }
   
-  // Show mesh stability stats
   Serial.println("\nMesh Statistics:");
   Serial.print("Uptime: ");
   Serial.print(millis() / 1000);
   Serial.println("s");
   
-  // Simple signal strength indication using WiFi RSSI
   printSignalStrength();
   
   Serial.println("--------------------------------");
 }
 
-// Function to print signal strength and check for connected nodes
 void printSignalStrength() {
   auto nodeList = mesh.getNodeList();
-  
   if (nodeList.size() == 0) {
     Serial.println("no devices connected in mesh network");
   } else {
@@ -575,31 +541,14 @@ void printSignalStrength() {
     #else
       int rssi = WiFi.RSSI();
     #endif
-    
     Serial.print("Signal strength: ");
     Serial.print(rssi);
     Serial.println(" dBm");
   }
 }
 
-void blink_led(int times, int delay_ms) {
-  for (int i = 0; i < times; i++) {
-    #ifdef ESP8266
-      digitalWrite(STATUS_LED, LOW);  // ON (active low for ESP8266)
-      delay(delay_ms);
-      digitalWrite(STATUS_LED, HIGH); // OFF
-    #else
-      digitalWrite(STATUS_LED, HIGH); // ON (active high for ESP32)
-      delay(delay_ms);
-      digitalWrite(STATUS_LED, LOW);  // OFF
-    #endif
-    delay(delay_ms);
-  }
-}
-
 void printDetailedNetworkInfo() {
   auto nodeList = mesh.getNodeList();
-  
   Serial.println("\n====== DETAILED MESH NETWORK INFORMATION ======");
   Serial.print("This Node ID: 0x");
   Serial.println(nodeId, HEX);
@@ -617,42 +566,30 @@ void printDetailedNetworkInfo() {
     for (auto &id : nodeList) {
       Serial.print("Node ID: 0x");
       Serial.println(id, HEX);
-      
-      // Get connection info
       bool exists = mesh.isConnected(id);
       Serial.print("  - Connection Status: ");
       Serial.println(exists ? "Connected" : "Not directly connected");
-      
-      // Try to get RSSI to this node (if directly connected)
       if (exists) {
         #ifdef ESP8266
           int rssi = WiFi.RSSI();
         #else
           int rssi = WiFi.RSSI();
         #endif
-        
         Serial.print("  - Signal Strength: ");
         Serial.print(rssi);
         Serial.println(" dBm");
       }
-      
-      // Time synchronization - can't directly check other nodes' time
       Serial.println("  - Time Sync: Part of mesh network");
-      
-      // Additional information - this is approximate since we don't store message data
       Serial.print("  - Mesh Distance: ~");
-      Serial.print(random(1, 3)); // Approximate hops (placeholder)
+      Serial.print(random(1, 3));
       Serial.println(" hops");
     }
   }
   
-  // Show network health stats
   Serial.println("\nNetwork Health:");
   Serial.print("- Mesh Network Uptime: ");
   Serial.print(millis() / 1000);
   Serial.println(" seconds");
-  
-  // Print network stability info
   Serial.print("- Local Free Memory: ");
   Serial.print(ESP.getFreeHeap());
   Serial.println(" bytes");
@@ -666,4 +603,19 @@ void printDetailedNetworkInfo() {
   #endif
   
   Serial.println("\n=============================================");
+}
+
+void blink_led(int times, int delay_ms) {
+  for (int i = 0; i < times; i++) {
+    #ifdef ESP8266
+      digitalWrite(STATUS_LED, LOW);
+      delay(delay_ms);
+      digitalWrite(STATUS_LED, HIGH);
+    #else
+      digitalWrite(STATUS_LED, HIGH);
+      delay(delay_ms);
+      digitalWrite(STATUS_LED, LOW);
+    #endif
+    delay(delay_ms);
+  }
 }
