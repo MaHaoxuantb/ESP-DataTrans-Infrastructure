@@ -219,7 +219,6 @@ void loop() {
         signalMonitorMode = true;
         Serial.println("Signal strength monitoring enabled. Type '0' to disable.");
       } 
-      else if (input == "0") {
         signalMonitorMode = false;
         Serial.println("Signal strength monitoring disabled.");
       }
