@@ -215,7 +215,7 @@ void loop() {
     String input = Serial.readStringUntil('\n');
     if (input.length() > 0) {
       // Check if this is a signal strength monitoring command
-      if (input == "1") {
+      if (input == "test: 1") {
         signalMonitorMode = true;
         Serial.println("Signal strength monitoring enabled. Type '0' to disable.");
       } 
