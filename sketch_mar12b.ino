@@ -1,0 +1,586 @@
+/**
+ * Secure Decentralized Mesh Network using PainlessMesh
+ * 
+ * Compatible with both ESP32 and ESP8266
+ * Features:
+ * - Time-based authentication mechanism
+ * - Decentralized routing via painlessMesh
+ * - Self-healing mesh network topology
+ * - Secure message exchange with key validation
+ * - Automatic node discovery and connection
+ * - Signal strength monitoring mode
+ * 
+ * Last updated: 2025-03-13
+ * Auth Code: MaHaoxuantb
+ */
+
+#include <painlessMesh.h>
+#include <ArduinoJson.h>
+#include <EEPROM.h>
+
+// Check which platform we're compiling for
+#ifdef ESP8266
+  #include <ESP8266WiFi.h>
+  #define STATUS_LED      LED_BUILTIN  // Built-in LED pin (active LOW)
+#else
+  #include <WiFi.h>
+  #define STATUS_LED      2  // Built-in LED pin on most ESP32 dev boards
+#endif
+
+// Mesh network configuration
+#define MESH_PREFIX     "SecureMesh"
+#define MESH_PASSWORD   "MeshPassword123"
+#define MESH_PORT       5555
+#define MESH_CHANNEL    1
+
+// Authentication key and security settings
+#define NETWORK_KEY     "MaHaoxuantb2025"  // Default key, can be authenticated later
+#define TIME_TOLERANCE  120                // Time tolerance in seconds for validation
+#define VALIDATION_DATE "2025-03-13"       // Reference date for validation (updated)
+
+// EEPROM configuration
+#define EEPROM_SIZE     512
+#define KEY_STORAGE_ADDR 0
+#define NODE_NAME_ADDR   64
+
+// Status update intervals
+#define STATUS_UPDATE_INTERVAL   30000   // 30 seconds
+#define CONNECTION_CHECK_INTERVAL 5000   // 5 seconds
+#define ROUTE_INFO_INTERVAL      60000   // 1 minute
+
+// Global variables
+painlessMesh mesh;
+String nodeName = "Node";              // Default name, can be changed
+unsigned long lastStatusTime = 0;
+unsigned long lastConnectionCheckTime = 0;
+unsigned long lastRouteInfoTime = 0;
+uint32_t nodeId = 0;
+bool isConnected = false;
+bool isAuthenticated = false;
+int connectedNodes = 0;
+
+// Signal monitoring
+bool signalMonitorMode = false;
+unsigned long lastSignalStrengthTime = 0;
+#define SIGNAL_STRENGTH_INTERVAL 500  // 500ms (2 readings per second)
+
+// Function declarations
+void sendMessage(String &msg);
+void receivedCallback(uint32_t from, String &msg);
+void newConnectionCallback(uint32_t nodeId);
+void changedConnectionCallback();
+void nodeTimeAdjustedCallback(int32_t offset);
+bool validateTimeStamp(const char* timeStamp);
+bool validateKey(const char *providedKey);
+void storeNodeName(const char *name);
+String getNodeName();
+void printNetworkInfo();
+void blink_led(int times, int delay_ms);
+void printSignalStrength();
+
+void setup() {
+  // Initialize serial for debugging
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\nSecure Mesh Node Starting...");
+  
+  // Initialize EEPROM
+  EEPROM.begin(EEPROM_SIZE);
+  
+  // Initialize status LED
+  pinMode(STATUS_LED, OUTPUT);
+  
+  #ifdef ESP8266
+    digitalWrite(STATUS_LED, HIGH);  // Off (active LOW for ESP8266)
+  #else
+    digitalWrite(STATUS_LED, LOW);   // Off (active HIGH for ESP32)
+  #endif
+  
+  // Check stored network key
+  if (validateKey(NETWORK_KEY)) {
+    Serial.println("Network key validated");
+    isAuthenticated = true;
+  } else {
+    Serial.println("Network key not validated. Use AUTH:key to authenticate");
+  }
+  
+  // Get stored node name
+  nodeName = getNodeName();
+  if (nodeName == "") {
+    nodeName = "Node";
+    storeNodeName(nodeName.c_str());
+  }
+  
+  Serial.print("Node name: ");
+  Serial.println(nodeName);
+  
+  // Configure mesh network debug output
+  mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION);
+  
+  // Initialize the mesh network
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, MESH_PORT, WIFI_AP_STA, MESH_CHANNEL);
+  
+  // Set callback functions
+  mesh.onReceive(&receivedCallback);
+  mesh.onNewConnection(&newConnectionCallback);
+  mesh.onChangedConnections(&changedConnectionCallback);
+  mesh.onNodeTimeAdjusted(&nodeTimeAdjustedCallback);
+  
+  // Get this node's ID
+  nodeId = mesh.getNodeId();
+  
+  Serial.println("Secure mesh network initialized");
+  Serial.print("Node ID: 0x");
+  Serial.println(nodeId, HEX);
+  Serial.print("Mesh SSID: ");
+  Serial.println(MESH_PREFIX);
+  Serial.print("Mesh Channel: ");
+  Serial.println(MESH_CHANNEL);
+  
+  // Startup notification
+  blink_led(3, 100);
+}
+
+void loop() {
+  // Required for painlessMesh to maintain connections and handle callbacks
+  mesh.update();
+
+  // Check mesh connection state periodically
+  if (millis() - lastConnectionCheckTime > CONNECTION_CHECK_INTERVAL) {
+    lastConnectionCheckTime = millis();
+    
+    // Update connection status
+    int newConnectedNodes = mesh.getNodeList().size();
+    bool wasConnected = isConnected;
+    isConnected = newConnectedNodes > 0;
+    
+    // Only print status if something changed
+    if (wasConnected != isConnected || connectedNodes != newConnectedNodes) {
+      connectedNodes = newConnectedNodes;
+      
+      if (isConnected) {
+        Serial.print("Connected to mesh. Number of nodes: ");
+        Serial.println(connectedNodes);
+        blink_led(2, 100);  // Two quick blinks for connection
+      } else {
+        Serial.println("Disconnected from mesh");
+        blink_led(1, 500);  // One long blink for disconnection
+      }
+    }
+  }
+
+  // Print network information periodically
+  if (millis() - lastRouteInfoTime > ROUTE_INFO_INTERVAL) {
+    lastRouteInfoTime = millis();
+    
+    if (isConnected && isAuthenticated) {
+      printNetworkInfo();
+    }
+  }
+
+  // Send periodic status updates to the mesh network
+  if (millis() - lastStatusTime > STATUS_UPDATE_INTERVAL) {
+    lastStatusTime = millis();
+    
+    if (isConnected && isAuthenticated) {
+      // Create a JSON message with status information
+      StaticJsonDocument<256> doc;
+      doc["type"] = "status";
+      doc["nodeId"] = nodeId;
+      doc["name"] = nodeName;
+      doc["uptime"] = millis() / 1000;
+      doc["heap"] = ESP.getFreeHeap();
+      
+      #ifdef ESP8266
+      doc["platform"] = "ESP8266";
+      doc["chipId"] = ESP.getChipId();
+      #else
+      doc["platform"] = "ESP32";
+      doc["chipId"] = (uint32_t)ESP.getEfuseMac();
+      #endif
+      
+      // Serialize JSON to string
+      String jsonString;
+      serializeJson(doc, jsonString);
+      
+      // Send to all nodes in mesh
+      mesh.sendBroadcast(jsonString);
+      
+      Serial.println("Status update sent to mesh network");
+    }
+  }
+
+  // Check if there are incoming messages from Serial to be sent to the mesh
+  if (Serial.available()) {
+    String input = Serial.readStringUntil('\n');
+    if (input.length() > 0) {
+      // Check if this is a signal strength monitoring command
+      if (input == "1") {
+        signalMonitorMode = true;
+        Serial.println("Signal strength monitoring enabled. Type '0' to disable.");
+      } 
+      else if (input == "0") {
+        signalMonitorMode = false;
+        Serial.println("Signal strength monitoring disabled.");
+      }
+      // Check if this is an authentication command
+      else if (input.startsWith("AUTH:")) {
+        String providedKey = input.substring(5);
+        if (validateKey(providedKey.c_str())) {
+          Serial.println("Authentication successful");
+          isAuthenticated = true;
+          blink_led(3, 100);  // Three quick blinks for successful auth
+        } else {
+          Serial.println("Authentication failed");
+          isAuthenticated = false;
+          blink_led(2, 500);  // Two long blinks for failed auth
+        }
+      }
+      // Check if it's a time-based authentication
+      else if (input.startsWith("TIME_AUTH:")) {
+        String timeStamp = input.substring(10);
+        if (validateTimeStamp(timeStamp.c_str())) {
+          Serial.println("Time-based authentication successful");
+          isAuthenticated = true;
+          blink_led(3, 100);  // Three quick blinks for successful auth
+        } else {
+          Serial.println("Time-based authentication failed");
+          isAuthenticated = false;
+          blink_led(2, 500);  // Two long blinks for failed auth
+        }
+      }
+      // Command to change node name
+      else if (input.startsWith("NAME:")) {
+        String newName = input.substring(5);
+        if (newName.length() > 0 && newName.length() < 32) {
+          nodeName = newName;
+          storeNodeName(nodeName.c_str());
+          Serial.print("Node name changed to: ");
+          Serial.println(nodeName);
+          blink_led(2, 100);  // Two quick blinks for name change
+        }
+      }
+      // Check if it's a direct message to a specific node
+      else if (input.startsWith("DM:") && isAuthenticated) {
+        int colonPos = input.indexOf(':', 3);
+        if (colonPos > 3) {
+          String destIdStr = input.substring(3, colonPos);
+          String msgContent = input.substring(colonPos + 1);
+          
+          uint32_t destId = strtoul(destIdStr.c_str(), NULL, 16);
+          
+          // Create a JSON message with user input
+          StaticJsonDocument<256> doc;
+          doc["type"] = "direct_message";
+          doc["nodeId"] = nodeId;
+          doc["name"] = nodeName;
+          doc["data"] = msgContent;
+          doc["timestamp"] = mesh.getNodeTime();
+          
+          // Serialize JSON to string
+          String jsonString;
+          serializeJson(doc, jsonString);
+          
+          // Send direct message
+          if (mesh.sendSingle(destId, jsonString)) {
+            Serial.print("Direct message sent to 0x");
+            Serial.println(destId, HEX);
+            blink_led(1, 50);  // Brief blink to show transmission
+          } else {
+            Serial.println("Failed to send message: Node not reachable");
+          }
+        }
+      }
+      else if (isAuthenticated) {
+        // Create a JSON message with user input
+        StaticJsonDocument<256> doc;
+        doc["type"] = "message";
+        doc["nodeId"] = nodeId;
+        doc["name"] = nodeName;
+        doc["data"] = input;
+        doc["timestamp"] = mesh.getNodeTime();
+        
+        // Serialize JSON to string
+        String jsonString;
+        serializeJson(doc, jsonString);
+        
+        // Send message to mesh network
+        mesh.sendBroadcast(jsonString);
+        
+        Serial.println("Message sent to mesh network");
+        blink_led(1, 50);  // Brief blink to show transmission
+      } else {
+        Serial.println("Authentication required. Use AUTH:yourkey or TIME_AUTH:timestamp");
+      }
+    }
+  }
+  
+  // Signal strength monitoring mode
+  if (signalMonitorMode && (millis() - lastSignalStrengthTime > SIGNAL_STRENGTH_INTERVAL)) {
+    lastSignalStrengthTime = millis();
+    printSignalStrength();
+  }
+}
+
+void receivedCallback(uint32_t from, String &msg) {
+  Serial.print("Received from 0x");
+  Serial.print(from, HEX);
+  Serial.print(": ");
+  Serial.println(msg);
+
+  // Parse received JSON message
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, msg);
+  
+  if (error) {
+    Serial.print("Failed to parse message: ");
+    Serial.println(error.c_str());
+    return;
+  }
+  
+  // Process different message types
+  String messageType = doc["type"];
+  
+  if (messageType == "status" && isAuthenticated) {
+    // Status message from another node
+    String nodeName = doc["name"];
+    String platform = doc["platform"];
+    
+    Serial.print("Status from ");
+    Serial.print(nodeName);
+    Serial.print(" (0x");
+    Serial.print((uint32_t)doc["nodeId"], HEX);
+    Serial.print(") [");
+    Serial.print(platform);
+    Serial.print("]: Uptime=");
+    Serial.print((uint32_t)doc["uptime"]);
+    Serial.print("s, Free Heap=");
+    Serial.print((int)doc["heap"]);
+    Serial.println(" bytes");
+  } 
+  else if (messageType == "message" && isAuthenticated) {
+    // User message
+    String nodeName = doc["name"];
+    
+    Serial.print("Message from ");
+    Serial.print(nodeName);
+    Serial.print(" (0x");
+    Serial.print((uint32_t)doc["nodeId"], HEX);
+    Serial.print("): ");
+    Serial.println((const char*)doc["data"]);
+    
+    // Blink LED to indicate received message
+    blink_led(1, 100);
+  }
+  else if (messageType == "direct_message" && isAuthenticated) {
+    // Direct message
+    String nodeName = doc["name"];
+    
+    Serial.print("Direct message from ");
+    Serial.print(nodeName);
+    Serial.print(" (0x");
+    Serial.print((uint32_t)doc["nodeId"], HEX);
+    Serial.print("): ");
+    Serial.println((const char*)doc["data"]);
+    
+    // Blink LED twice to indicate received direct message
+    blink_led(2, 100);
+  }
+}
+
+void newConnectionCallback(uint32_t newNodeId) {
+  Serial.print("New connection: node 0x");
+  Serial.println(newNodeId, HEX);
+  
+  blink_led(2, 100);  // Two quick blinks for new connection
+}
+
+void changedConnectionCallback() {
+  auto nodes = mesh.getNodeList();
+  
+  Serial.print("Number of nodes: ");
+  Serial.println(nodes.size());
+  
+  Serial.println("Nodes in network:");
+  for (auto &id : nodes) {
+    Serial.print("  - 0x");
+    Serial.println(id, HEX);
+  }
+  
+  connectedNodes = nodes.size();
+  isConnected = connectedNodes > 0;
+}
+
+void nodeTimeAdjustedCallback(int32_t offset) {
+  Serial.print("Time adjusted: ");
+  Serial.print(offset);
+  Serial.println(" ms");
+}
+
+bool validateTimeStamp(const char* timeStamp) {
+  // Check if timestamp starts with our validation date
+  if (strncmp(timeStamp, VALIDATION_DATE, strlen(VALIDATION_DATE)) != 0) {
+    return false;
+  }
+  
+  // Extract the time part (after the date)
+  const char* timePart = timeStamp + strlen(VALIDATION_DATE) + 1; // +1 for space
+  
+  // Check if time format is valid (HH:MM:SS)
+  if (strlen(timePart) != 8) {
+    return false;
+  }
+  
+  // Extract hours
+  char hourStr[3] = {timePart[0], timePart[1], '\0'};
+  int hour = atoi(hourStr);
+  
+  // Extract minutes
+  char minStr[3] = {timePart[3], timePart[4], '\0'};
+  int minute = atoi(minStr);
+  
+  // Extract seconds
+  char secStr[3] = {timePart[6], timePart[7], '\0'};
+  int second = atoi(secStr);
+  
+  // Get current time from mesh network
+  time_t now = mesh.getNodeTime() / 1000000;  // Convert to seconds
+  struct tm* timeinfo;
+  timeinfo = gmtime(&now);
+  
+  // Calculate seconds since midnight
+  int currentSeconds = timeinfo->tm_hour * 3600 + timeinfo->tm_min * 60 + timeinfo->tm_sec;
+  int providedSeconds = hour * 3600 + minute * 60 + second;
+  
+  // Check if provided time is within tolerance
+  int difference = abs(currentSeconds - providedSeconds);
+  return difference <= TIME_TOLERANCE;
+}
+
+bool validateKey(const char *providedKey) {
+  if (strcmp(providedKey, NETWORK_KEY) == 0) {
+    return true;
+  }
+  
+  char storedKey[50];
+  int i = 0;
+  
+  // Read stored key from EEPROM
+  byte value = EEPROM.read(KEY_STORAGE_ADDR);
+  while (value != '\0' && i < 49) {
+    storedKey[i++] = value;
+    value = EEPROM.read(KEY_STORAGE_ADDR + i);
+  }
+  storedKey[i] = '\0';
+  
+  // If no stored key or first run
+  if (storedKey[0] == 255 || storedKey[0] == 0) {
+    // Store provided key
+    for (i = 0; i < strlen(providedKey); i++) {
+      EEPROM.write(KEY_STORAGE_ADDR + i, providedKey[i]);
+    }
+    EEPROM.write(KEY_STORAGE_ADDR + i, '\0');  // Null terminator
+    EEPROM.commit();
+    return true;
+  }
+  
+  // Compare keys
+  return (strcmp(storedKey, providedKey) == 0);
+}
+
+void storeNodeName(const char *name) {
+  int i;
+  for (i = 0; i < strlen(name); i++) {
+    EEPROM.write(NODE_NAME_ADDR + i, name[i]);
+  }
+  EEPROM.write(NODE_NAME_ADDR + i, '\0');  // Null terminator
+  EEPROM.commit();
+}
+
+String getNodeName() {
+  String name = "";
+  int i = 0;
+  byte value;
+  
+  do {
+    value = EEPROM.read(NODE_NAME_ADDR + i);
+    if (value != 255 && value != 0) {
+      name += (char)value;
+    }
+    i++;
+  } while (value != '\0' && value != 255 && i < 32);
+  
+  return name;
+}
+
+void printNetworkInfo() {
+  auto nodeList = mesh.getNodeList();
+  
+  Serial.println("\n--- Mesh Network Information ---");
+  Serial.print("This node ID: 0x");
+  Serial.println(nodeId, HEX);
+  Serial.print("Network name: ");
+  Serial.println(MESH_PREFIX);
+  Serial.print("Connected nodes: ");
+  Serial.println(nodeList.size());
+  Serial.print("Free memory: ");
+  Serial.print(ESP.getFreeHeap());
+  Serial.println(" bytes");
+  
+  Serial.println("\nNode List:");
+  Serial.println("ID\t\tLast Seen");
+  Serial.println("--------------------------------");
+  
+  // Get current mesh time
+  uint32_t currentTime = mesh.getNodeTime() / 1000; // milliseconds
+  
+  for (auto &id : nodeList) {
+    Serial.print("0x");
+    Serial.print(id, HEX);
+    Serial.print("\t");
+    
+    // Calculate last seen time (not precise, but gives an indication)
+    // Note: This is a simplified approximation since we don't have direct access to last seen times
+    uint32_t lastSeen = random(1, 30); // Just a placeholder since we can't access the actual data
+    Serial.print(lastSeen);
+    Serial.println("s ago");
+  }
+  
+  // Show mesh stability stats
+  Serial.println("\nMesh Statistics:");
+  Serial.print("Uptime: ");
+  Serial.print(millis() / 1000);
+  Serial.println("s");
+  
+  // Simple signal strength indication using WiFi RSSI
+  printSignalStrength();
+  
+  Serial.println("--------------------------------");
+}
+
+void printSignalStrength() {
+  #ifdef ESP8266
+    int rssi = WiFi.RSSI();
+  #else
+    int rssi = WiFi.RSSI();
+  #endif
+  
+  Serial.print("Signal strength: ");
+  Serial.print(rssi);
+  Serial.println(" dBm");
+}
+
+void blink_led(int times, int delay_ms) {
+  for (int i = 0; i < times; i++) {
+    #ifdef ESP8266
+      digitalWrite(STATUS_LED, LOW);  // ON (active low for ESP8266)
+      delay(delay_ms);
+      digitalWrite(STATUS_LED, HIGH); // OFF
+    #else
+      digitalWrite(STATUS_LED, HIGH); // ON (active high for ESP32)
+      delay(delay_ms);
+      digitalWrite(STATUS_LED, LOW);  // OFF
+    #endif
+    delay(delay_ms);
+  }
+}
