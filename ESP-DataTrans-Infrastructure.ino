@@ -28,15 +28,15 @@
 #endif
 
 // Mesh network configuration
-#define MESH_PREFIX     "SecureMesh"
-#define MESH_PASSWORD   "MeshPassword123"
-#define MESH_PORT       5555
+#define MESH_PREFIX     "MeshPoint_WifiProtocol_Annopia"
+#define MESH_PASSWORD   "MeshPassword123.AnnopiaInfructure2025"
+#define MESH_PORT       5411
 #define MESH_CHANNEL    1
 
 // Authentication key and security settings
-#define NETWORK_KEY     "MaHaoxuantb2025"  // Default key, can be authenticated later
+#define NETWORK_KEY     "com.AnnopiaInfrastructure.e.MaHaoxuantb2025"  // Default key, can be authenticated later
 #define TIME_TOLERANCE  120                // Time tolerance in seconds for validation
-#define VALIDATION_DATE "2025-03-13"       // Reference date for validation (updated)
+#define VALIDATION_DATE "2025-03-16"       // Reference date for validation (updated)
 
 // EEPROM configuration
 #define EEPROM_SIZE     512
