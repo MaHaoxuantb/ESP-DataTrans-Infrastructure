@@ -362,6 +362,9 @@ void loop() {
         detailedMode = true;
         signalMonitorMode = false;
         Serial.println("Detailed network info mode ON. 'test: 0' to disable.");
+      } else if (input == "test:3" && isAuthenticated) {
+        Serial.println("Triggering network speed test for 10 seconds...");
+        testNetworkSpeed();
       } else if (input == "test: 0") {
         signalMonitorMode = false;
         detailedMode = false;
@@ -1003,4 +1006,37 @@ void printDetailedNetworkInfo() {
     Serial.print(id, HEX);
     Serial.println(" is connected.");
   }
+}
+
+void testNetworkSpeed() {
+    const uint32_t testDurationMs = 10 * 1000;      // 10 seconds
+    const size_t   payloadSize    = 512;            // bytes per packet
+    String         payload(payloadSize, 'X');       // fill with dummy data
+
+    uint32_t bytesSent   = 0;
+    uint32_t packetsSent = 0;
+    uint32_t startTime   = millis();
+
+    Serial.println("---- Starting 10s network speed test ----");
+    while (millis() - startTime < testDurationMs) {
+        // sendBroadcast returns true if it enqueued successfully
+        if (mesh.sendBroadcast(payload)) {
+            bytesSent   += payloadSize;
+            packetsSent += 1;
+        }
+        // optional: yield to keep WiFi stack happy
+        yield();
+    }
+
+    float durationSec = (millis() - startTime) / 1000.0;
+    float bps         = (bytesSent * 8.0) / durationSec;
+    float kbps        = bps / 1000.0;
+
+    Serial.println("---- Network Speed Test Complete ----");
+    Serial.print  ("Duration (s):       "); Serial.println(durationSec);
+    Serial.print  ("Packets sent:       "); Serial.println(packetsSent);
+    Serial.print  ("Total bytes sent:   "); Serial.println(bytesSent);
+    Serial.print  ("Throughput (bps):   "); Serial.println(bps);
+    Serial.print  ("Throughput (kbps):  "); Serial.println(kbps);
+    Serial.println("--------------------------------------");
 }
