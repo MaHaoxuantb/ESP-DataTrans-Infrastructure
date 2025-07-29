@@ -3,5 +3,7 @@
 
 This project aims to utilize mesh technology to rapidly transmit small messages across multiple devices, enabling them to create a big mesh network. This is something like Apple FindMy Network.
 
+Full encryption for security.
+
 ---
 ## How to use it
