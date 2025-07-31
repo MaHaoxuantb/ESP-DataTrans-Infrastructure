@@ -1,3 +1,7 @@
+// IMPORTANT: 
+// This is ESP-DataTrans-Infrastructure Project By MaHaoxuantb, under GNU 3.0 license
+// Part of codes might help with AI.
+
 #include <painlessMesh.h>
 #include <ArduinoJson.h>
 #include <EEPROM.h>
