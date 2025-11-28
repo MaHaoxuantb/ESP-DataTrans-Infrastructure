@@ -150,45 +150,64 @@ BLECharacteristic *pTxCharacteristic = NULL;
 BLECharacteristic *pRxCharacteristic = NULL;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
-uint8_t bleBuffer[BLE_BUFFER_SIZE];
-size_t bleBufferIndex = 0;
 Preferences preferences;
 uint8_t encryptionKey[ENCRYPTION_KEY_SIZE];
 bool isPaired = false;
 
+// === NEW: queue for BLE->Mesh messages ===
+struct PendingMsg { String json; };
+volatile bool hasPending = false;
+PendingMsg pending;
+
 // BLE server callbacks
 class ServerCallbacks: public BLEServerCallbacks {
-  void onConnect(BLEServer* pServer) {
+  void onConnect(BLEServer* pServer) override {
     deviceConnected = true;
     Serial.println("BLE Client connected");
-    blink_led(3, 100); // three quick blinks
+    blink_led(3, 100);
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
+    isPaired = true; // simple fallback for NimBLE
+#endif
   }
 
-  void onDisconnect(BLEServer* pServer) {
+  void onDisconnect(BLEServer* pServer) override {
     deviceConnected = false;
     Serial.println("BLE Client disconnected");
-    blink_led(1, 500); // one long blink
-    pServer->startAdvertising(); // re-advertise
+    blink_led(1, 500);
+    isPaired = false;
+    pServer->startAdvertising();
   }
 
-  void onPassKeyRequest() {
-    Serial.println("Client requested passkey");
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
+  // ===== NimBLE (ESP32-C3 etc.) =====
+  uint32_t onPassKeyRequest() override {
+    Serial.println("Client requested passkey (NimBLE, returning 0)");
+    return 0;
+  }
+  // ⚠️ NimBLE has NO onPassKeyNotify, so omit it.
+  // ⚠️ NimBLE also has NO esp_ble_auth_cmpl_t, so omit it.
+
+#elif defined(CONFIG_BT_BLUEDROID_ENABLED)
+  // ===== Bluedroid (classic ESP32, Arduino core 2.x) =====
+  void onPassKeyRequest() override {
+    Serial.println("Client requested passkey (Bluedroid)");
   }
 
-  void onPassKeyNotify(uint32_t pass_key) {
+  void onPassKeyNotify(uint32_t pass_key) override {
     Serial.print("Passkey Notification: ");
     Serial.println(pass_key);
   }
 
-  void onAuthenticationComplete(esp_ble_auth_cmpl_t auth_cmpl) {
-    if(auth_cmpl.success) {
-      Serial.println("BLE authentication success");
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t auth_cmpl) override {
+    if (auth_cmpl.success) {
+      Serial.println("BLE authentication success (Bluedroid)");
       isPaired = true;
     } else {
-      Serial.println("BLE authentication failed");
+      Serial.println("BLE authentication failed (Bluedroid)");
       isPaired = false;
     }
   }
+#endif
 };
 
 // BLE RX characteristic callback
@@ -288,6 +307,24 @@ void setup() {
 
 void loop() {
   mesh.update();
+
+#ifdef ESP32
+  // === NEW: drain pending messages safely ===
+  if (hasPending) {
+    noInterrupts();
+    String js = pending.json;
+    hasPending = false;
+    interrupts();
+    if (isConnected && isAuthenticated) {
+      mesh.sendBroadcast(js);
+      Serial.println("Queued BLE message sent to mesh");
+    }
+  }
+
+  if (HAS_BLE) {
+    handleBLEConnections();
+  }
+#endif
 
   // Connection check
   if (millis() - lastConnectionCheckTime > CONNECTION_CHECK_INTERVAL) {
@@ -522,13 +559,6 @@ void loop() {
       }
     }
   }
-
-#ifdef ESP32
-  // If BLE is used
-  if (HAS_BLE) {
-    handleBLEConnections();
-  }
-#endif
 
   // Test modes
   if (signalMonitorMode && (millis() - lastSignalStrengthTime > SIGNAL_STRENGTH_INTERVAL)) {
@@ -799,7 +829,10 @@ String getNodeName() {
   }
   return String(storedName);
 #else
-  return preferences.getString("nodeName", "");
+  if (preferences.isKey("nodeName")) {
+    return preferences.getString("nodeName", "");
+  }
+  return "";
 #endif
 }
 
@@ -811,7 +844,10 @@ void storeUserNickname(const char* nickname) {
 }
 
 String getUserNickname() {
-  return preferences.getString("userNickname", "");
+  if (preferences.isKey("userNickname")) {
+    return preferences.getString("userNickname", "");
+  }
+  return "";
 }
 
 bool initEncryptionKey() {
@@ -893,13 +929,12 @@ void handleBLEConnections() {
   }
 }
 
+// ========== BLE handler with queue ==========
 void processBleMessage(const char* message, size_t length) {
   StaticJsonDocument<256> doc;
-  DeserializationError error = deserializeJson(doc, message);
-  if (error) {
-    Serial.print("BLE JSON parse error: ");
-    Serial.println(error.c_str());
-    return;
+  if (deserializeJson(doc, message)) { 
+    Serial.println("BLE JSON parse error"); 
+    return; 
   }
 
   String cmd = doc["cmd"];
@@ -908,48 +943,40 @@ void processBleMessage(const char* message, size_t length) {
     if (nick.length() > 0 && nick.length() < 32) {
       userNickname = nick;
       storeUserNickname(userNickname.c_str());
-      Serial.print("Nickname set via BLE: ");
+      Serial.print("Nickname set via BLE: "); 
       Serial.println(userNickname);
       blink_led(2, 100);
 
       if (isConnected && isAuthenticated) {
-        StaticJsonDocument<128> broadcastDoc;
-        broadcastDoc["type"]     = "nickname_update";
-        broadcastDoc["nodeId"]   = nodeId;
-        broadcastDoc["nickname"] = userNickname;
-
-        String jsonString;
-        serializeJson(broadcastDoc, jsonString);
-        mesh.sendBroadcast(jsonString);
+        StaticJsonDocument<128> d;
+        d["type"] = "nickname_update";
+        d["nodeId"] = nodeId;
+        d["nickname"] = userNickname;
+        String js; 
+        serializeJson(d, js);
+        pending.json = js; 
+        hasPending = true;
       }
     }
-  }
-  else if (cmd == "sendMeshMessage") {
+  } else if (cmd == "sendMeshMessage") {
     String data = doc["data"];
     if (isConnected && isAuthenticated && data.length() > 0) {
-      StaticJsonDocument<512> msgDoc;
-      msgDoc["type"]     = "message";
-      msgDoc["nodeId"]   = nodeId;
-      msgDoc["name"]     = nodeName;
-      if (userNickname != "") {
-        msgDoc["nickname"] = userNickname;
-      }
-      msgDoc["data"]     = data;
-      msgDoc["timestamp"] = mesh.getNodeTime();
-
-      String jsonString;
-      serializeJson(msgDoc, jsonString);
-      mesh.sendBroadcast(jsonString);
-
-      Serial.print("Sent mesh message from BLE: ");
+      StaticJsonDocument<512> m;
+      m["type"] = "message";
+      m["nodeId"] = nodeId;
+      m["name"] = nodeName;
+      if (userNickname != "") m["nickname"] = userNickname;
+      m["data"] = data;
+      m["timestamp"] = mesh.getNodeTime();
+      String js; 
+      serializeJson(m, js);
+      pending.json = js; 
+      hasPending = true;
+      Serial.print("Queued mesh message from BLE: "); 
       Serial.println(data);
     } else {
       Serial.println("Not connected or not authenticated");
     }
-  }
-  else {
-    Serial.print("Unrecognized BLE command: ");
-    Serial.println(cmd);
   }
 }
 
